@@ -122,10 +122,12 @@ proc to_units*(this: var Units, ss: OrderedTable, db: db_sqlite.DbConn) {.discar
       PairType = "Case"
       IFpair = "Single"
       Pool = "."
-    if paired[OrderID] > 1 and SampleType in ["BL", "KL", "OP"]:
-      PairType = "Control"
-      IFpair = "Pair"
-      Pool = "."
+    if paired[OrderID] > 1:
+      if SampleType in ["BL", "KL", "OP"]:
+        PairType = "Control"
+        IFpair = "Pair"
+      else:
+        IFpair = "Pair"
 
     units.writeLine(@[OrderID, 
       SampleID, 

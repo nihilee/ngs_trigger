@@ -2,11 +2,18 @@ import os
 import db_sqlite
 import strformat
 import parsecfg
+import httpclient
+import json
+import times
+import md5
+import unicode
 
 import docopt
 import unpack
+
 import logging
 var logger = newConsoleLogger(fmtStr="$datetime | $levelname | ")
+
 # 导入自定义模块
 import samplesheet  # samplesheet只与拆分相关，并不需要本地库的信息
 import units  # 用于生成units文件
@@ -43,6 +50,39 @@ proc check_analysis_status(runid: string, db: DbConn): string =
   return db.getValue(sql"SELECT Analysis FROM run_status WHERE RunID=?", runid)
 
 
+# 用来向接口上传异常信息
+proc postmessage(runid, remark: string) = 
+  # 拆分异常，没有那么多字段要传
+  let
+    code = "bioinfo"
+    ts = now().format("YYYY-MM-dd HH:mm:ss")
+    source = "1"
+    sign_key = "b9ca7bc2d6149a27d2a3fc0cc09c0cab"
+    key = sign_key & ts & code
+    sign = getMD5(key).toUpper()
+
+  let client = newHttpClient()
+  client.headers = newHttpHeaders({ 
+    "Content-Type": "application/json", 
+    "sign": sign, 
+    "source": source })
+
+  let body = %*{
+    "runId": runid,
+    "sysOrderId": "",
+    "examineItemCode": "",
+    "sampleCode": "",
+    "errorType": 1026,
+    "remark": remark,
+  }
+
+  let response = client.request("http://30.6.0.10:6111/ibox/operator/api/bio/analyseError", 
+    httpMethod = HttpPost, 
+    body = $body)
+
+  echo response.status
+
+
 proc run_bcl2fastq(inputs: Inputs) =
   # unpack这个inputs对象
   inputs.unpackObject(fqdir, anadir, db, runid, bcl2fastq, bcldir, samplesheet)
@@ -62,16 +102,19 @@ proc run_bcl2fastq(inputs: Inputs) =
     --no-lane-splitting \
     > { joinPath(anadir, runid & "_bcl.log") } 2>&1
   """
+  #--tiles s_1 \
 
   #测试调用shell命令
-  let ls = "sleep 2"
+  #let ls = "sleep 2"
 
   echo b2f
-  if execShellCmd(ls) == 0:
+  if execShellCmd(b2f) == 0:
     logger.log(lvlInfo, &"runid: {runid}, bcl2fastq completed")
     db.exec(sql"UPDATE run_status SET Fastq = ? where RunID = ?", "ok", runid)
   else:
+    # 运行失败的信息需要推送到接口
     logger.log(lvlInfo, &"runid: {runid}, bcl2fastq failed, check {anadir}/{runid}_bcl.log")
+    postmessage(runid, "bcl2fastq failed from trigger")
     db.exec(sql"UPDATE run_status SET Fastq = ? where RunID = ?", "err", runid)
     quit()
 
@@ -96,7 +139,7 @@ proc run_snakemake(inputs: Inputs) =
   """
   echo smk
 
-    #测试调用shell命令
+  #测试调用shell命令
   let ls = "sleep 2"
 
   if execShellCmd(ls) == 0:
@@ -104,6 +147,7 @@ proc run_snakemake(inputs: Inputs) =
     db.exec(sql"UPDATE run_status SET Analysis = ? where RunID = ?", "ok", runid)
   else:
     logger.log(lvlInfo, &"runid: {runid}, analysis failed, check {anadir}/{runid}_bcl.log")
+    postmessage(runid, "analysis failed from trigger")
     db.exec(sql"UPDATE run_status SET Analysis = ? where RunID = ?", "err", runid)
     quit()
 
@@ -151,7 +195,6 @@ proc initDB(db: db_sqlite.DbConn) =
     "FT")
 
   logger.log(lvlInfo, "Init ngs_monitor.db completed")
-
 
 
 proc main() =
@@ -204,9 +247,10 @@ proc main() =
   var u = Units(runid:runid, fqdir:fqdir, mergedir:mergedir, anadir:anadir)
   try:
     u.to_units(s.sheetTab, db)
-    logger.log(lvlInfo, &"runid: {runid}, units generated, check {anadir}/units.tsv")
+    logger.log(lvlInfo, &"runid: {runid}, units generated, {anadir}/units.tsv")
   except:
-    logger.log(lvlError, &"runid: {runid}, units generate failed, check {anadir}/units.tsv")
+    postmessage(runid, "units generate failed from trigger")
+    logger.log(lvlError, &"runid: {runid}, units generate failed, check fastq? {fqdir}")
     quit()
 
 
